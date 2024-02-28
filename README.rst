@@ -37,6 +37,14 @@ This implementation borrows mostly from `AllenNLP CRF module
 <https://github.com/allenai/allennlp/blob/master/allennlp/modules/conditional_ra
 ndom_field.py>`_ with some modifications.
 
+ONNX Support
+=============
+Worked on Bert+CRF in export.py
+Python: 3.11.5
+onnx: 1.15.0
+torch: 2.1.1
+transformers: 4.35.2
+
 Documentation
 =============
 

@@ -114,8 +114,10 @@ class CRF(nn.Module):
         assert reduction == 'token_mean'
         return llh.sum() / mask.type_as(emissions).sum()
 
-    def decode(self, emissions: torch.Tensor,
-               mask: Optional[torch.ByteTensor] = None) -> List[List[int]]:
+    @torch.jit.export
+    def decode(self,
+               emissions: torch.Tensor,
+               mask: Optional[torch.ByteTensor] = None):
         """Find the most likely tag sequence using Viterbi algorithm.
 
         Args:
@@ -151,16 +153,18 @@ class CRF(nn.Module):
                 f'got {emissions.size(2)}')
 
         if tags is not None:
-            if emissions.shape[:2] != tags.shape:
+            if emissions.shape[0] != tags.shape[0] or emissions.shape[1] != tags.shape[1]:
                 raise ValueError(
                     'the first two dimensions of emissions and tags must match, '
-                    f'got {tuple(emissions.shape[:2])} and {tuple(tags.shape)}')
+                    f'got {(emissions.shape[0], emissions.shape[1])} and {(tags.shape[0], tags.shape[1])}'
+                )
 
         if mask is not None:
-            if emissions.shape[:2] != mask.shape:
+            if emissions.shape[0] != mask.shape[0] or emissions.shape[1] != mask.shape[1]:
                 raise ValueError(
                     'the first two dimensions of emissions and mask must match, '
-                    f'got {tuple(emissions.shape[:2])} and {tuple(mask.shape)}')
+                    f'got {(emissions.shape[0], emissions.shape[1])} and {(mask.shape[0], mask.shape[1])}'
+                )
             no_empty_seq = not self.batch_first and mask[0].all()
             no_empty_seq_bf = self.batch_first and mask[:, 0].all()
             if not no_empty_seq and not no_empty_seq_bf:
@@ -173,7 +177,7 @@ class CRF(nn.Module):
         # tags: (seq_length, batch_size)
         # mask: (seq_length, batch_size)
         assert emissions.dim() == 3 and tags.dim() == 2
-        assert emissions.shape[:2] == tags.shape
+        assert emissions.shape[0] == mask.shape[0] and emissions.shape[1] == mask.shape[1]
         assert emissions.size(2) == self.num_tags
         assert mask.shape == tags.shape
         assert mask[0].all()
@@ -256,8 +260,9 @@ class CRF(nn.Module):
         # shape: (batch_size,)
         return torch.logsumexp(score, dim=1)
 
+    # @torch.jit.script
     def _viterbi_decode(self, emissions: torch.FloatTensor,
-                        mask: torch.ByteTensor) -> List[List[int]]:
+                        mask: torch.ByteTensor):
         # emissions: (seq_length, batch_size, num_tags)
         # mask: (seq_length, batch_size)
         assert emissions.dim() == 3 and mask.dim() == 2
@@ -270,7 +275,7 @@ class CRF(nn.Module):
         # Start transition and first emission
         # shape: (batch_size, num_tags)
         score = self.start_transitions + emissions[0]
-        history = []
+        history: List[torch.Tensor] = []
 
         # score is a tensor of size (batch_size, num_tags) where for every batch,
         # value at column j stores the score of the best tag sequence so far that ends
@@ -313,22 +318,19 @@ class CRF(nn.Module):
 
         # shape: (batch_size,)
         seq_ends = mask.long().sum(dim=0) - 1
-        best_tags_list = []
-
+        seq_max_length = emissions.size(0)
+        fill_value = -1
+        best_tags_tensor = torch.full((batch_size, seq_max_length), fill_value, dtype=torch.int64)
+        
         for idx in range(batch_size):
-            # Find the tag which maximizes the score at the last timestep; this is our best tag
-            # for the last timestep
-            _, best_last_tag = score[idx].max(dim=0)
-            best_tags = [best_last_tag.item()]
+            # Initialization for tracking the best tags sequence for the current sequence
+            _, best_last_tag = score[idx].max(dim=0)  # Get the best last tag
+            # Set the best tag for the last position in the sequence
+            best_tags_tensor[idx, seq_ends[idx]] = best_last_tag.item()
 
-            # We trace back where the best last tag comes from, append that to our best tag
-            # sequence, and trace it back again, and so on
-            for hist in reversed(history[:seq_ends[idx]]):
-                best_last_tag = hist[idx][best_tags[-1]]
-                best_tags.append(best_last_tag.item())
-
-            # Reverse the order because we start from the last timestep
-            best_tags.reverse()
-            best_tags_list.append(best_tags)
-
-        return best_tags_list
+            # Backtrack the best path
+            for pos in range(int(seq_ends[idx].item()), 0, -1):  # Start from the end going backwards
+                best_last_tag = history[pos-1][idx, best_last_tag]
+                best_tags_tensor[idx, pos-1] = best_last_tag.item()
+        
+        return best_tags_tensor
